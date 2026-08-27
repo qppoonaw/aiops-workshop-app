@@ -1,0 +1,99 @@
+version: 0.2
+
+# CodeBuild buildspec for the AIOps Workshop sample app.
+#
+# Environment variables (set by the pipeline / CodeBuild project):
+#   APP_NAME           Name prefix for the SAM stack and resources (default: aiops-workshop)
+#   SAM_STACK_NAME     CloudFormation stack name for the app (default: <APP_NAME>-app)
+#   ARTIFACT_BUCKET    S3 bucket for SAM packaging artifacts
+#   RELEASE_VARIANT    "good" (default) or "bad" — selects the release behavior
+#   AWS_REGION         Provided by CodeBuild
+
+env:
+  variables:
+    APP_NAME: aiops-workshop
+    RELEASE_VARIANT: good
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 20
+    commands:
+      - echo "Installing SAM CLI and dependencies"
+      - pip install --quiet aws-sam-cli
+      - npm ci || npm install
+
+  pre_build:
+    commands:
+      - export SAM_STACK_NAME="${SAM_STACK_NAME:-${APP_NAME}-app}"
+      - |
+        # Select the release variant. The bad release swaps the hot-path
+        # handler for one that throws on every GET /items.
+        if [ "$RELEASE_VARIANT" = "bad" ]; then
+          echo "RELEASE_VARIANT=bad -> deploying the faulty list handler"
+          cp src/items/list.bad.js src/items/list.js
+        else
+          echo "RELEASE_VARIANT=good -> deploying the healthy list handler"
+        fi
+
+  build:
+    commands:
+      - echo "Building with SAM"
+      - sam build
+      - echo "Deploying with SAM"
+      - |
+        sam deploy \
+          --stack-name "$SAM_STACK_NAME" \
+          --s3-bucket "$ARTIFACT_BUCKET" \
+          --capabilities CAPABILITY_IAM \
+          --parameter-overrides "AppName=${APP_NAME}" \
+          --no-confirm-changeset \
+          --no-fail-on-empty-changeset \
+          --region "$AWS_REGION"
+
+  post_build:
+    commands:
+      - echo "Reading app stack outputs"
+      - |
+        API_BASE_URL=$(aws cloudformation describe-stacks \
+          --stack-name "$SAM_STACK_NAME" --region "$AWS_REGION" \
+          --query "Stacks[0].Outputs[?OutputKey=='ApiBaseUrl'].OutputValue" \
+          --output text)
+        FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
+          --stack-name "$SAM_STACK_NAME" --region "$AWS_REGION" \
+          --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+          --output text)
+        FRONTEND_URL=$(aws cloudformation describe-stacks \
+          --stack-name "$SAM_STACK_NAME" --region "$AWS_REGION" \
+          --query "Stacks[0].Outputs[?OutputKey=='FrontendUrl'].OutputValue" \
+          --output text)
+        RCA_URL=$(aws cloudformation describe-stacks \
+          --stack-name "$SAM_STACK_NAME" --region "$AWS_REGION" \
+          --query "Stacks[0].Outputs[?OutputKey=='RcaFunctionUrl'].OutputValue" \
+          --output text)
+        echo "API_BASE_URL=$API_BASE_URL"
+        echo "FRONTEND_URL=$FRONTEND_URL"
+        echo "RCA_URL=$RCA_URL"
+      - echo "Publishing the frontend with the deployed API URL"
+      - |
+        # Generate config.js with the real API base URL, then upload the site.
+        printf "window.API_BASE_URL = '%s';\n" "$API_BASE_URL" > frontend/config.js
+        aws s3 sync frontend/ "s3://$FRONTEND_BUCKET/" --delete --region "$AWS_REGION"
+      - echo "Publishing participant-facing values to SSM Parameter Store"
+      - |
+        # These are app-stack values that Workshop Studio cannot template on the
+        # page (the app is deployed here, not by the provisioning stack). Publish
+        # them to a known SSM path so participants have one reliable place to read
+        # the app URL and the RCA sink URL.
+        aws ssm put-parameter --name "/${APP_NAME}/app-url" --type String \
+          --overwrite --value "$FRONTEND_URL" --region "$AWS_REGION"
+        aws ssm put-parameter --name "/${APP_NAME}/api-base-url" --type String \
+          --overwrite --value "$API_BASE_URL" --region "$AWS_REGION"
+        aws ssm put-parameter --name "/${APP_NAME}/rca-url" --type String \
+          --overwrite --value "$RCA_URL" --region "$AWS_REGION"
+      - echo "Build and deploy complete"
+
+artifacts:
+  files:
+    - '**/*'
+  discard-paths: no

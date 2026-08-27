@@ -1,0 +1,14 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# SAM / build artifacts
+.aws-sam/
+packaged.yaml
+samconfig.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

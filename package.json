@@ -1,0 +1,19 @@
+{
+  "name": "aiops-workshop-sample-app",
+  "version": "1.0.0",
+  "description": "Serverless 3-tier items API used as the target for the AIOps Pipeline Workshop.",
+  "license": "MIT-0",
+  "scripts": {
+    "build": "sam build",
+    "deploy": "sam deploy --guided",
+    "deploy:ci": "sam deploy --no-confirm-changeset --no-fail-on-empty-changeset",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.632.0",
+    "@aws-sdk/lib-dynamodb": "^3.632.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

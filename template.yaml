@@ -1,0 +1,270 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AIOps Pipeline Workshop - 3-tier serverless sample application.
+  API Gateway (HTTP API) + Lambda (Node.js 20) + DynamoDB (on-demand),
+  static frontend on S3 + CloudFront, plus workshop glue (RCA sink and
+  load generator). X-Ray tracing and CloudWatch logging enabled.
+
+Parameters:
+  AppName:
+    Type: String
+    Default: aiops-workshop
+    Description: Name prefix for resources.
+  LoadGenSchedule:
+    Type: String
+    Default: rate(1 minute)
+    Description: EventBridge schedule expression for the load generator.
+  RequestsPerRun:
+    Type: Number
+    Default: 20
+    Description: Number of requests the load generator sends per invocation.
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    MemorySize: 256
+    Timeout: 10
+    Tracing: Active
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        POWERTOOLS_SERVICE_NAME: !Ref AppName
+
+Resources:
+
+  ## ---------------------------------------------------------------------------
+  ## Tier 3 - Data
+  ## ---------------------------------------------------------------------------
+  ItemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-items'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  RcaTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${AppName}-rca'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+
+  ## ---------------------------------------------------------------------------
+  ## Tier 1 - API entry point (HTTP API)
+  ## ---------------------------------------------------------------------------
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: '$default'
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+  ## ---------------------------------------------------------------------------
+  ## Tier 2 - Application (items API)
+  ## ---------------------------------------------------------------------------
+  ListItemsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-list-items'
+      CodeUri: src/
+      Handler: items/list.handler
+      Environment:
+        Variables:
+          ITEMS_TABLE: !Ref ItemsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ItemsTable
+      Events:
+        ListItems:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /items
+            Method: GET
+
+  GetItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-get-item'
+      CodeUri: src/
+      Handler: items/get.handler
+      Environment:
+        Variables:
+          ITEMS_TABLE: !Ref ItemsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ItemsTable
+      Events:
+        GetItem:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /items/{id}
+            Method: GET
+
+  CreateItemFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-create-item'
+      CodeUri: src/
+      Handler: items/create.handler
+      Environment:
+        Variables:
+          ITEMS_TABLE: !Ref ItemsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ItemsTable
+      Events:
+        CreateItem:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /items
+            Method: POST
+
+  ## ---------------------------------------------------------------------------
+  ## Workshop glue - RCA sink (Function URL: POST store / GET fetch)
+  ## ---------------------------------------------------------------------------
+  RcaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-rca-sink'
+      CodeUri: src/
+      Handler: rca/index.handler
+      Environment:
+        Variables:
+          RCA_TABLE: !Ref RcaTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref RcaTable
+      # SECURITY: AuthType must be AWS_IAM. NONE makes the Function URL world-
+      # accessible (flagged by Palisade/Epoxy). Callers must now SigV4-sign
+      # requests with credentials allowed to lambda:InvokeFunctionUrl.
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowMethods:
+            - GET
+            - POST
+
+  ## ---------------------------------------------------------------------------
+  ## Workshop glue - Load generator (scheduled traffic)
+  ## ---------------------------------------------------------------------------
+  LoadGenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${AppName}-load-generator'
+      CodeUri: src/
+      Handler: loadgen/index.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          API_BASE_URL: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+          REQUESTS_PER_RUN: !Ref RequestsPerRun
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: !Ref LoadGenSchedule
+            Enabled: true
+
+  ## ---------------------------------------------------------------------------
+  ## Tier 1 - Static frontend (S3 + CloudFront, OAC)
+  ## ---------------------------------------------------------------------------
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${AppName}-frontend-${AWS::AccountId}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${AppName}-frontend-oac'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref FrontendOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          # CachingDisabled managed policy so redeploys are visible immediately.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket.Arn}/*'
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}'
+
+Outputs:
+  ApiBaseUrl:
+    Description: Base URL of the items API (HTTP API).
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  FrontendUrl:
+    Description: CloudFront URL of the web frontend.
+    Value: !Sub 'https://${FrontendDistribution.DomainName}'
+  FrontendBucketName:
+    Description: S3 bucket that hosts the frontend (build uploads here).
+    Value: !Ref FrontendBucket
+  RcaFunctionUrl:
+    Description: RCA sink Function URL (Kiro POSTs/GETs the RCA here).
+    Value: !GetAtt RcaFunctionUrl.FunctionUrl
+    # Note: SAM creates an AWS::Lambda::Url logical resource named
+    # "<FunctionLogicalId>Url" (RcaFunctionUrl) when FunctionUrlConfig is set,
+    # so this GetAtt resolves to that resource's FunctionUrl attribute.
+  ItemsTableName:
+    Description: DynamoDB items table name.
+    Value: !Ref ItemsTable
+  RcaTableName:
+    Description: DynamoDB RCA table name.
+    Value: !Ref RcaTable

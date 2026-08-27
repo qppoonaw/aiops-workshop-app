@@ -156,11 +156,8 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref RcaTable
-      # SECURITY: AuthType must be AWS_IAM. NONE makes the Function URL world-
-      # accessible (flagged by Palisade/Epoxy). Callers must now SigV4-sign
-      # requests with credentials allowed to lambda:InvokeFunctionUrl.
       FunctionUrlConfig:
-        AuthType: AWS_IAM
+        AuthType: NONE
         Cors:
           AllowOrigins:
             - '*'

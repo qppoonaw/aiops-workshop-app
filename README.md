@@ -2,9 +2,7 @@
 
 A cost-optimized, 3-tier **serverless** web application used as the hands-on target for the AIOps Pipeline Workshop. This is a **reusable asset**: deploy it into a workshop account, run the pipeline, and drive the Security Agent / DevOps Agent / Kiro loop against it.
 
-> ⚠️ **Intentionally vulnerable — do NOT use in production.** This application ships with **deliberately seeded security vulnerabilities** and a **deliberately broken "bad release" variant** so the AWS Security Agent and DevOps Agent have concrete, safe issues to find during the workshop. See [Seeded security vulnerabilities](#seeded-security-vulnerabilities-intentional) and [Good vs bad release](#good-vs-bad-release-the-fault) below. Never reuse this code as a starting point for real services.
-
-> This repository is the standalone app asset used by the [AIOps Pipeline Workshop](https://github.com/qppoonaw). It contains the deployable application (`buildspec.yml`, `template.yaml`, `src/`, `frontend/`). The workshop *guide* (Workshop Studio content) lives separately.
+> This directory is git-tracked on purpose. (The repository's `assets/` folder is reserved by Workshop Studio for S3-hosted static files and is gitignored, so it is not suitable for source code.)
 
 ## Architecture
 
@@ -23,32 +21,29 @@ Supporting components (workshop glue):
 ## Directory layout
 
 ```
-.
+sample-app/
 ├── README.md                  <-- this file
 ├── package.json               <-- Node deps + scripts for the API
 ├── template.yaml              <-- SAM template: full application stack
 ├── buildspec.yml              <-- CodeBuild build/package steps
 ├── src/
 │   ├── items/
-│   │   ├── list.js            <-- GET  /items  (healthy hot-path handler)
-│   │   ├── list.bad.js        <-- GET  /items  (bad-release fault variant)
+│   │   ├── list.js            <-- GET  /items
 │   │   ├── get.js             <-- GET  /items/{id}
 │   │   ├── create.js          <-- POST /items   (contains seeded vulns)
-│   │   ├── db.js              <-- DynamoDB data layer (contains seeded vulns)
-│   │   └── RELEASE_VARIANTS.md <-- how the good/bad release swap works
+│   │   └── db.js              <-- DynamoDB data layer (contains seeded vulns)
 │   ├── common/
-│   │   └── response.js        <-- shared HTTP response helper (contains seeded vulns)
+│   │   └── response.js        <-- shared HTTP response helper (CORS)
 │   ├── loadgen/
 │   │   └── index.js           <-- scheduled load generator
 │   └── rca/
 │       └── index.js           <-- RCA sink (POST store / GET fetch)
-└── frontend/
-    ├── index.html             <-- minimal single-page UI
-    ├── app.js                 <-- calls the items API
-    └── config.js              <-- generated at build time with the deployed API URL
+├── frontend/
+│   ├── index.html             <-- minimal single-page UI
+│   └── app.js                 <-- calls the items API
+└── pipeline/
+    └── pipeline.yaml          <-- CodePipeline + CodeBuild (pre-baked CI/CD)
 ```
-
-> **CI/CD is not in this repo.** The pipeline (S3-sourced CodePipeline + CodeBuild) is provisioned by the workshop's `static/workshop-provision.yaml` in the workshop content repository — see `pipeline/README.md`. The old `pipeline/pipeline.yaml` (CodeCommit-based) was removed because CodeCommit is closed to new AWS accounts.
 
 ## Seeded security vulnerabilities (intentional)
 
